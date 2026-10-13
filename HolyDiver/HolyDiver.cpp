@@ -17,6 +17,7 @@ using namespace std;
 // Functions
 /****************************************************/
 void start_splash_screen(void);
+void game_over_splash_screen(void);
 void startup_routines(void);
 void quit_routines(void);
 
@@ -48,7 +49,7 @@ const int INIT_LIVES = 3;
 typedef struct Player {
 
     // Stats
-    int health;
+    int health; //TODO: Decide if necessary
     int oxygen;
     int lives;
 
@@ -85,6 +86,30 @@ int main(void)
             break;
 
         update_state(input);
+
+        if (player_data.oxygen <= 0)
+        {
+            player_data.lives--;
+            free_map();
+
+            if (player_data.lives <= 0)
+            {
+                game_over_splash_screen();
+                break;
+            }
+
+            // Lives remain: reload the level and refill oxygen.
+            if (load_level(current_Level_path) != 0)
+            {
+                cout << "Could not reload the level." << endl;
+                break;
+            }
+
+            player_data.oxygen = MAX_OXYGEN;
+            cout << "You lost a life. Level restarted." << endl;
+        }
+
+
         render_screen();
     }
 
@@ -286,6 +311,7 @@ void update_state(char input)
         if (result == 0)
         {
             player_data.oxygen = MAX_OXYGEN;
+            player_data.lives = INIT_LIVES;
             cout << "Level restarted." << endl;
         }
 
@@ -395,6 +421,7 @@ void render_screen(void)
     }
     cout << endl;
     cout << "OXYGEN: " << player_data.oxygen << endl;
+    cout << "LIVES:  " << player_data.lives << endl;
     cout << endl;
 }
 
@@ -431,6 +458,27 @@ void start_splash_screen(void)
     cout << endl << "Enter commands and enjoy! "
         << "(press q to quit at all times)"
         << endl << endl;
+}
+
+
+void game_over_splash_screen(void)
+{
+    cout << endl;
+
+    cout << R"ASCII(
+                                                          
+.oPYo.                         .oPYo.                     
+8    8                         8    8                     
+8      .oPYo. ooYoYo. .oPYo.   8    8 o    o .oPYo. oPYo. 
+8   oo .oooo8 8' 8  8 8oooo8   8    8 Y.  .P 8oooo8 8  `' 
+8    8 8    8 8  8  8 8.       8    8 `b..d' 8.     8     
+`YooP8 `YooP8 8  8  8 `Yooo'   `YooP'  `YP'  `Yooo' 8     
+:....8 :.....:..:..:..:.....::::.....:::...:::.....:..::::
+:::::8 :::::::::::::::::::::::::::::::::::::::::::::::::::
+:::::8.:::::::::::::::::::::::::::::::::::::::::::::::::::
+)ASCII";
+
+    cout << endl << "You ran out of oxygen." << endl;
 }
 
 
