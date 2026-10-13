@@ -326,6 +326,14 @@ void update_state(char input)
     }
 
 
+    // Every movement costs oxygen
+    player_data.oxygen -= oxygen_loss;
+
+    // Clamp oxygen at 0
+    if (player_data.oxygen < 0)
+        player_data.oxygen = 0;
+
+
     // Don't allow coordinates outside the map.
     if (new_x < 0 ||
         new_y < 0 ||
@@ -359,8 +367,6 @@ void update_state(char input)
     // Draw player at new position.
     map[player_data.pos_y][player_data.pos_x] = 'P';
 
-    // Reduce oxygen
-    player_data.oxygen = player_data.oxygen - oxygen_loss;
 }
 
 
@@ -442,6 +448,12 @@ void startup_routines(void)
     {
         cout << "Enter path to TextMap file (0 = TextMap.txt): ";
         getline(cin, filepath);
+
+        if (filepath == "q" || filepath == "Q")
+        {
+            quit_routines();
+            exit(0);
+        }
 
         // Shortcut: pressing 0 loads the default map file.
         if (filepath == "0")

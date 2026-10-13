@@ -1,7 +1,7 @@
 {
     "Version": "1.2",
     "Data": {
-        "Source": "c:\\users\\omistaja\\source\\holydiver\\holydiver.cpp",
+        "Source": "c:\\users\\omistaja\\source\\repos\\holydiver\\holydiver\\holydiver.cpp",
         "ProvidedModule": "",
         "Includes": [
             "c:\\program files (x86)\\windows kits\\10\\include\\10.0.26100.0\\ucrt\\stdio.h",
