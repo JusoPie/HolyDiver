@@ -22,18 +22,19 @@ using namespace std;
              Helpers
 **********************************/
 
-struct Position 
-{ 
-    int x = 0; int y = 0; 
+// Value type representing a location on the grid.
+struct Position
+{
+    int x = 0; int y = 0;
 };
 
-bool operator==(Position a, Position b) 
-{ 
-    return a.x == b.x && a.y == b.y; 
+bool operator==(Position a, Position b)
+{
+    return a.x == b.x && a.y == b.y;
 }
 
-enum class Direction 
-{ 
+enum class Direction
+{
     Up,
     Down,
     Left,
@@ -53,62 +54,141 @@ Position adjacent(Position position, Direction direction)
     return position;
 }
 
-enum class CommandType 
+enum class CommandType
 {
     Move,
     Illuminate,
     ToggleMapVisibility,
+    StartNewGame,
     Restart,
     Quit,
     Invalid
 };
 
+// Value type describing an action independently of keyboard input.
 struct Command
 {
     CommandType type = CommandType::Invalid;
     Direction direction = Direction::Up;
 };
 
-enum class EnemyMovement 
+enum class InputContext
+{
+    Playing,
+    GameOver
+};
+
+enum class EnemyMovement
 {
     Stationary,
     RandomWalker
 };
 
+// Level-construction data, not a live enemy.
 struct EnemySpawn
 {
     Position position;
-    EnemyMovement movement;
+    EnemyMovement movement = EnemyMovement::Stationary;
 };
 
-struct LevelData 
+// Parsed level data. Terrain contains only water and walls.
+struct LevelData
 {
-    // Terrain never contains player or enemy characters. Enemies, items, and walls(other than borders) are generated trough code
     vector<string> terrain;
     Position playerSpawn;
     vector<EnemySpawn> enemies;
 };
 
+enum class DeathCause
+{
+    None,
+    Injuries,
+    OxygenDepleted
+};
 
-// Player stores resources. Only World can change its position
+enum class ActionOutcome
+{
+    Ignored,
+    Moved,
+    MovementBlocked,
+    OutsideMap,
+    InsufficientBattery,
+    Illuminated
+};
+
+// Gameplay result containing facts for Game and ConsoleUI to interpret.
+struct TurnResult
+{
+    ActionOutcome outcome = ActionOutcome::Ignored;
+    int damage = 0;
+    DeathCause deathCause = DeathCause::None;
+};
+
+// Read-only snapshot for displaying resources without exposing a live Player.
+struct PlayerStats
+{
+    int health = 0;
+    int oxygen = 0;
+    int battery = 0;
+};
+
+enum class TerrainTile
+{
+    Wall,
+    Water
+};
+
+// Semantic cell contents. ConsoleUI chooses the actual display characters.
+enum class CellContent
+{
+    Outside,
+    Hidden,
+    Wall,
+    Water,
+    Player,
+    StationaryEnemy,
+    RandomWalkerEnemy
+};
+
+/*********************************
+          Game objects
+**********************************/
+
+// Responsibility: own the player's position and resources, keep resource
+// values within their limits, and determine whether the player is alive.
+// World owns the live Player and validates destinations before calling moveTo.
 class Player
 {
 
 public:
-    
+
     static constexpr int Maximum = 100;
 
     explicit Player(Position spawn) : _position(spawn) {}
-    
+
     Position position() const { return _position; }
 
     int health() const { return _health; }
     int oxygen() const { return _oxygen; }
     int battery() const { return _battery; }
 
+    PlayerStats stats() const { return { _health, _oxygen, _battery }; }
+
     bool isAlive() const
     {
-        return _health > 0 && _oxygen > 0;
+        return deathCause() == DeathCause::None;
+    }
+
+    DeathCause deathCause() const
+    {
+        if (_health <= 0) return DeathCause::Injuries;
+        if (_oxygen <= 0) return DeathCause::OxygenDepleted;
+        return DeathCause::None;
+    }
+
+    void moveTo(Position destination)
+    {
+        _position = destination;
     }
 
     void takeDamage(int amount)
@@ -130,7 +210,7 @@ public:
         return true;
     }
 
-    // These functions for when items are added
+    // Resource restoration is ready for future item interactions.
     void replenishOxygen(int amount)
     {
         _oxygen += clamp(amount, 0, Maximum - _oxygen);
@@ -148,75 +228,120 @@ public:
 
 private:
 
-    friend class World;
-    
     Position _position;
-    
     int _health = Maximum, _oxygen = Maximum, _battery = Maximum;
 };
 
-
-// Enemies suggest moves; World checks whether those moves are allowed
-class Enemy 
+// Responsibility: own an enemy's position, activation state, damage value,
+// and movement behavior. World validates and applies proposed movement.
+// Display characters and spawning policy do not belong to Enemy.
+class Enemy
 {
 
 public:
 
     Enemy(Position position, EnemyMovement movement)
-        : _position(position), _movement(movement) {}
+        : _position(position), _movement(movement)
+    {
+        if (movement != EnemyMovement::Stationary && movement != EnemyMovement::RandomWalker)
+            throw runtime_error("Invalid enemy movement.");
+    }
 
     Position position() const { return _position; }
-    
+
+    EnemyMovement movement() const { return _movement; }
+
     bool isActive() const { return _active; }
-    
+
     void activate() { _active = true; }
-    
-    int giveDamage() const { return 10; }
-    
-    char symbol() const 
+
+    int damage() const { return 10; }
+
+    void moveTo(Position destination)
     {
-        return _movement == EnemyMovement::Stationary ? 'm' : 'M';
+        _position = destination;
     }
-    
-    Position chooseMove(mt19937& random) const 
+
+    Position chooseMove(mt19937& random) const
     {
         if (!_active || _movement == EnemyMovement::Stationary)
             return _position;
 
-        // Four directions plus a chance to stay still
+        // Four directions plus a chance to stay still.
         int choice = uniform_int_distribution<int>(0, 4)(random);
         if (choice == 4) return _position;
         return adjacent(_position, static_cast<Direction>(choice));
     }
 
 private:
-    
-    friend class World;
-    
+
     Position _position;
     EnemyMovement _movement;
     bool _active = false;
 };
 
-// The loader only reads files. It never writes to the map
-class MapLoader 
+// Responsibility: own and validate the static grid, and answer terrain and
+// boundary queries. It knows nothing about actors, visibility, or console output.
+class Terrain
 {
 
 public:
-    
-    static LevelData load(const string& path)
+
+    explicit Terrain(vector<string> rows) : _rows(move(rows))
     {
-        ifstream file(path);
-        if (!file) throw runtime_error("Could not open map: " + path);
-        return read(file);
+        if (_rows.empty() || _rows.front().empty())
+            throw runtime_error("Empty terrain.");
+
+        const auto maximum = static_cast<size_t>(numeric_limits<int>::max());
+        if (_rows.size() > maximum || _rows.front().size() > maximum)
+            throw runtime_error("Map is too large.");
+
+        for (const auto& row : _rows)
+            if (row.size() != _rows.front().size() || row.find_first_not_of("ox") != string::npos)
+                throw runtime_error("Invalid terrain.");
     }
-    
-    static LevelData read(istream& input)
+
+    int width() const { return static_cast<int>(_rows.front().size()); }
+
+    int height() const { return static_cast<int>(_rows.size()); }
+
+    bool isInside(Position p) const
+    {
+        return p.x >= 0 && p.y >= 0 && p.x < width() && p.y < height();
+    }
+
+    bool isWalkable(Position p) const
+    {
+        return isInside(p) && _rows[p.y][p.x] == 'o';
+    }
+
+    TerrainTile tileAt(Position p) const
+    {
+        if (!isInside(p))
+            throw out_of_range("Position is outside the terrain.");
+
+        return _rows[p.y][p.x] == 'o' ? TerrainTile::Water : TerrainTile::Wall;
+    }
+
+private:
+
+    vector<string> _rows;
+};
+
+/*********************************
+          Level loading
+**********************************/
+
+// Responsibility: translate the map-file format into level data.
+// Namespace functions are sufficient because the loader has no instance state.
+// Terrain validates the grid; World validates relationships between spawns.
+namespace MapLoader
+{
+    LevelData read(istream& input)
     {
         LevelData level;
         string row;
-        int players = 0;
-        size_t width = 0;
+        bool foundPlayer = false;
 
         while (getline(input, row))
         {
@@ -225,38 +350,34 @@ public:
 
             if (row.empty())
                 throw runtime_error("Map has an empty row.");
-            
-            if (level.terrain.empty())
-                width = row.size();
-            
-            if (row.size() != width)
-                throw runtime_error("Map is not rectangular.");
-            
-            if (row.size() > static_cast<size_t>(numeric_limits<int>::max()) ||
-                level.terrain.size() >= static_cast<size_t>(numeric_limits<int>::max()))
+
+            const auto maximum = static_cast<size_t>(numeric_limits<int>::max());
+            if (row.size() > maximum || level.terrain.size() >= maximum)
                 throw runtime_error("Map is too large.");
-            
+
             int y = static_cast<int>(level.terrain.size());
-            
+
             for (size_t x = 0; x < row.size(); ++x)
             {
-                Position p{static_cast<int>(x), y};
+                Position p{ static_cast<int>(x), y };
                 switch (row[x])
                 {
-                case 'x': 
-                
+                case 'x':
                 case 'o':
                     break;
-                
+
                 case 'P':
-                    level.playerSpawn = p; ++players; row[x] = 'o'; break;
-                
+                    if (foundPlayer)
+                        throw runtime_error("Map needs exactly one P.");
+
+                    level.playerSpawn = p; foundPlayer = true; row[x] = 'o'; break;
+
                 case 'm':
                     level.enemies.push_back({ p, EnemyMovement::Stationary }); row[x] = 'o'; break;
-                
+
                 case 'M':
                     level.enemies.push_back({ p, EnemyMovement::RandomWalker }); row[x] = 'o'; break;
-                
+
                 default:
                     throw runtime_error("Unknown map symbol.");
                 }
@@ -267,17 +388,30 @@ public:
 
         if (input.bad() || (input.fail() && !input.eof()))
             throw runtime_error("Could not finish reading map.");
-        
-        if (level.terrain.empty() || players != 1)
+
+        if (level.terrain.empty() || !foundPlayer)
             throw runtime_error("Map needs rows and exactly one P.");
-        
+
         return level;
     }
-};
 
+    LevelData load(const string& path)
+    {
+        ifstream file(path);
+        if (!file) throw runtime_error("Could not open map: " + path);
+        return read(file);
+    }
+}
 
-// World owns the terrain, visibility, player, and enemies
-class World 
+/*********************************
+           World rules
+**********************************/
+
+// Responsibility: own the live actors and exploration state, validate actor
+// placement, and coordinate movement, illumination, and collision rules.
+// It returns gameplay facts and exposes snapshots, never mutable actor references.
+// Terrain owns grid details; ConsoleUI owns presentation; Game owns session lives.
+class World
 {
 
 public:
@@ -285,126 +419,146 @@ public:
     explicit World(LevelData level, unsigned seed = random_device{}())
         : _terrain(move(level.terrain)), _player(level.playerSpawn), _random(seed)
     {
-        // Validate even when LevelData was created without MapLoader
-        if (_terrain.empty() || _terrain.front().empty())
-            throw runtime_error("Empty world.");
-        
-        for (const auto& row : _terrain)
-            
-            if (row.size() != _terrain.front().size() || row.find_first_not_of("ox") != string::npos)
-                throw runtime_error("Invalid terrain.");
-        
-        if (!isWalkable(_player.position()))
+        if (!_terrain.isWalkable(_player.position()))
             throw runtime_error("Invalid player spawn.");
-        
-        _revealed.assign(_terrain.size(), vector<bool>(_terrain.front().size(), false));
-        
-        for (const auto& spawn : level.enemies) 
+
+        _revealed.assign(height(), vector<bool>(width(), false));
+
+        for (const auto& spawn : level.enemies)
         {
-            if (!isWalkable(spawn.position) || spawn.position == _player.position() || occupied(spawn.position))
+            if (!_terrain.isWalkable(spawn.position) || spawn.position == _player.position() || occupied(spawn.position))
                 throw runtime_error("Invalid enemy spawn.");
-            
+
             _enemies.emplace_back(spawn.position, spawn.movement);
         }
-        
-        // Add enemies to blank map and reveals player
-        addEnemy(EnemyMovement::Stationary, 'm');
-        addEnemy(EnemyMovement::RandomWalker, 'M');
+
         reveal(_player.position());
     }
-    
-    int width() const { return static_cast<int>(_terrain.front().size()); }
-    
-    int height() const { return static_cast<int>(_terrain.size()); }
-    
-    const Player& player() const { return _player; }
-    
-    const vector<Enemy>& enemies() const { return _enemies; }
-    
-    const vector<string>& terrain() const { return _terrain; }
-    
-    bool isInside(Position p) const { return p.x >= 0 && p.y >= 0 && p.x < width() && p.y < height(); }
-    
-    bool isWalkable(Position p) const { return isInside(p) && _terrain[p.y][p.x] == 'o'; }
-    
-    // Development view leaves exploration and enemy activation unchanged
-    void toggleMapVisibility() { _showWholeMap = !_showWholeMap; }
 
-    bool isWholeMapVisible() const { return _showWholeMap; }
+    int width() const { return _terrain.width(); }
 
-    char symbolAt(Position p) const
+    int height() const { return _terrain.height(); }
+
+    PlayerStats playerStats() const { return _player.stats(); }
+
+    bool isPlayerAlive() const { return _player.isAlive(); }
+
+    CellContent cellAt(Position p, bool showWholeMap = false) const
     {
-        if (!isInside(p)) return '?';
-        if (p == _player.position()) return 'P';
-        if (!_showWholeMap && !_revealed[p.y][p.x]) return ' ';
-        for (const auto& enemy : _enemies) if (enemy.position() == p) return enemy.symbol();
-        return _terrain[p.y][p.x];
+        if (!_terrain.isInside(p)) return CellContent::Outside;
+        if (p == _player.position()) return CellContent::Player;
+        if (!showWholeMap && !_revealed[p.y][p.x]) return CellContent::Hidden;
+
+        for (const auto& enemy : _enemies)
+            if (enemy.position() == p)
+                return enemy.movement() == EnemyMovement::Stationary
+                ? CellContent::StationaryEnemy : CellContent::RandomWalkerEnemy;
+
+        return _terrain.tileAt(p) == TerrainTile::Water ? CellContent::Water : CellContent::Wall;
     }
 
-    string takeTurn(Command command) 
+    // Explicit setup operation. The caller decides which enemy types are required.
+    // Identity is based on behavior, never on a character used for rendering.
+    void addEnemyIfMissing(EnemyMovement movement)
     {
+        if (movement != EnemyMovement::Stationary && movement != EnemyMovement::RandomWalker)
+            throw runtime_error("Invalid enemy movement.");
+
+        for (const auto& enemy : _enemies)
+            if (enemy.movement() == movement)
+                return;
+
+        vector<Position> free;
+
+        for (int y = 0; y < height(); ++y) for (int x = 0; x < width(); ++x)
+        {
+            Position p{ x, y };
+            if (_terrain.isWalkable(p) && !(p == _player.position()) && !occupied(p))
+                free.push_back(p);
+        }
+
+        // Tiny maps may have no room for another enemy.
+        if (free.empty())
+            return;
+
+        auto index = uniform_int_distribution<size_t>(0, free.size() - 1)(_random);
+        Position spawn = free[index];
+        _enemies.emplace_back(spawn, movement);
+
+        if (_revealed[spawn.y][spawn.x])
+            _enemies.back().activate();
+    }
+
+    TurnResult takeTurn(Command command)
+    {
+        TurnResult result;
         if (!_player.isAlive() || (command.type != CommandType::Move && command.type != CommandType::Illuminate))
-            return "";
-        
-        // Every gameplay attempt uses oxygen
-        _player.consumeOxygen(2);
-        
+            return result;
+
+        // Every gameplay attempt uses oxygen, including blocked attempts.
+        _player.consumeOxygen(OxygenPerTurn);
+
         if (!_player.isAlive())
-            return ""; // Game reports the cause of death.
-        
+        {
+            result.deathCause = _player.deathCause();
+            return result;
+        }
+
         Position target = adjacent(_player.position(), command.direction);
-        
-        string message;
-        
-        if (command.type == CommandType::Move)
-        {
-            if (isWalkable(target))
-            {
-                _player._position = target; reveal(target);
-            }
-            else
-                message = "Movement blocked.";
-        } 
-        
-        else
-        {
-            if (!isInside(target))
-                message = "No tile in that direction.";
+        result.outcome = command.type == CommandType::Move ? movePlayer(target) : illuminate(target);
 
-            else if (!_player.tryConsumeBattery(5))
-                message = "Not enough battery.";
-
-            else
-            {
-                reveal(target); message = "Tile illuminated.";
-            }
-        }
-
-        // A collision before and after enemy movement must not cause two hits
+        // Each enemy can hit at most once during this turn.
         vector<bool> hit(_enemies.size(), false);
-        int damage = collide(hit);
-        
-        if (_player.isAlive()) 
+        result.damage = collide(hit);
+
+        if (_player.isAlive())
         {
-            for (auto& enemy : _enemies) 
-            {
-                Position next = enemy.chooseMove(_random);
-
-                if (isWalkable(next) && !occupied(next))
-                    enemy._position = next;
-            }
-
-            damage += collide(hit);
+            moveEnemies();
+            result.damage += collide(hit);
         }
 
-        if (damage)
-            message += " Damage taken: " + to_string(damage);
-        
-        return message;
+        result.deathCause = _player.deathCause();
+        return result;
     }
 
 private:
-    
+
+    static constexpr int OxygenPerTurn = 2;
+    static constexpr int IlluminationCost = 5;
+
+    ActionOutcome movePlayer(Position target)
+    {
+        if (!_terrain.isWalkable(target))
+            return ActionOutcome::MovementBlocked;
+
+        _player.moveTo(target);
+        reveal(target);
+        return ActionOutcome::Moved;
+    }
+
+    ActionOutcome illuminate(Position target)
+    {
+        if (!_terrain.isInside(target))
+            return ActionOutcome::OutsideMap;
+
+        if (!_player.tryConsumeBattery(IlluminationCost))
+            return ActionOutcome::InsufficientBattery;
+
+        reveal(target);
+        return ActionOutcome::Illuminated;
+    }
+
+    void moveEnemies()
+    {
+        for (auto& enemy : _enemies)
+        {
+            Position next = enemy.chooseMove(_random);
+
+            if (_terrain.isWalkable(next) && !occupied(next))
+                enemy.moveTo(next);
+        }
+    }
+
     bool occupied(Position p) const
     {
         for (const auto& enemy : _enemies)
@@ -412,28 +566,6 @@ private:
                 return true;
 
         return false;
-    }
-
-    void addEnemy(EnemyMovement movement, char symbol)
-    {
-        for (const auto& enemy : _enemies)
-            if (enemy.symbol() == symbol)
-                return;
-        
-        vector<Position> free;
-        
-        for (int y = 0; y < height(); ++y) for (int x = 0; x < width(); ++x)
-        {
-            Position p{x, y};
-            if (isWalkable(p) && !(p == _player.position()) && !occupied(p))
-                free.push_back(p);
-        }
-
-        // Tiny maps may have no room for another enemy
-        if (free.empty())
-            return;
-        auto index = uniform_int_distribution<size_t>(0, free.size() - 1)(_random);
-        _enemies.emplace_back(free[index], movement);
     }
 
     void reveal(Position p)
@@ -453,8 +585,9 @@ private:
             if (!hit[i] && _enemies[i].position() == _player.position())
             {
                 _enemies[i].activate();
-                _player.takeDamage(_enemies[i].giveDamage());
-                damage += _enemies[i].giveDamage();
+                int attackDamage = _enemies[i].damage();
+                _player.takeDamage(attackDamage);
+                damage += attackDamage;
                 hit[i] = true;
             }
         }
@@ -462,24 +595,44 @@ private:
         return damage;
     }
 
-    // Containers free their own memory when the world is replaced or destroyed
-    vector<string> _terrain;
+    Terrain _terrain;
     vector<vector<bool>> _revealed;
-    bool _showWholeMap = false;
     Player _player;
     vector<Enemy> _enemies;
     mt19937 _random;
 };
 
-// ConsoleUI reads commands and displays data; it does not change the world
+// Responsibility: define the default population policy explicitly, separately
+// from World construction. Existing enemies of either type are retained.
+namespace LevelPopulation
+{
+    void addDefaults(World& world)
+    {
+        world.addEnemyIfMissing(EnemyMovement::Stationary);
+        world.addEnemyIfMissing(EnemyMovement::RandomWalker);
+    }
+}
+
+/*********************************
+           Console UI
+**********************************/
+
+// Responsibility: read console input, decode commands for the current menu,
+// and format all world results and cell contents for display.
+// The development-map toggle affects presentation only, never exploration.
+// Stream references allow the same UI to work with cin/cout or test streams.
 class ConsoleUI
 {
 
 public:
-    
-    void DisplayMainMenu() const 
+
+    explicit ConsoleUI(istream& input = cin, ostream& output = cout)
+        : _input(input), _output(output) {
+    }
+
+    void DisplayMainMenu() const
     {
-        cout << R"ASCII(
+        _output << R"ASCII(
               ,.  _~-.,               .
            ~'`_ \/,_. \_
           / ,"_>@`,__`~.)             |           .
@@ -498,215 +651,338 @@ public:
 '~=-.,__,.-=~`'^`'~=-.,__,.-=~'`^`'~=-.,__,.-=~'`^`'~=-.,__,.-=~'`^`'~=-
 )ASCII";
 
-        cout << "\n";
-        cout << "~~~~~~~~~~ HOLY DIVER ~~~~~~~~~~\n";
-        cout << "        0 - Start Game\n";
-        cout << "        Q - Quit Game\n";
-        cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
+        _output << "\n";
+        _output << "~~~~~~~~~~ HOLY DIVER ~~~~~~~~~~\n";
+        _output << "        0 - Start Game\n";
+        _output << "        Q - Quit Game\n";
+        _output << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
     }
 
     void DisplayDeathScreen() const
     {
-        cout << R"ASCII(
-   )\.-.      /`-.    )\   )\   )\.---.          .-./(       .-.   )\.---.     /`-.  
- ,' ,-,_)   ,' _  \  (  ',/ /  (   ,-._(       ,'     )  ,'  /  ) (   ,-._(  ,' _  \ 
-(  .   __  (  '-' (   )    (    \  '-,        (  .-, (  (  ) | (   \  '-,   (  '-' ( 
- ) '._\ _)  )   _  ) (  \(\ \    ) ,-`         ) '._\ )  ) './ /    ) ,-`    ) ,_ .' 
-(  ,   (   (  ,' ) \  `.) /  )  (  ``-.       (  ,   (  (  ,  (    (  ``-.  (  ' ) \ 
- )/'._.'    )/    )/      '.(    )..-.(        )/ ._.'   )/..'      )..-.(   )/   )/ 
+        _output << R"ASCII(
+   )\.-.      /`-.    )\   )\   )\.---.          .-./(       .-.   )\.---.     /`-.
+ ,' ,-,_)   ,' _  \  (  ',/ /  (   ,-._(       ,'     )  ,'  /  ) (   ,-._(  ,' _  \
+(  .   __  (  '-' (   )    (    \  '-,        (  .-, (  (  ) | (   \  '-,   (  '-' (
+ ) '._\ _)  )   _  ) (  \(\ \    ) ,-`         ) '._\ )  ) './ /    ) ,-`    ) ,_ .'
+(  ,   (   (  ,' ) \  `.) /  )  (  ``-.       (  ,   (  (  ,  (    (  ``-.  (  ' ) \
+ )/'._.'    )/    )/      '.(    )..-.(        )/ ._.'   )/..'      )..-.(   )/   )/
                                                                                      )ASCII";
 
-        cout << "\n";
-        cout << "~~~~~~~~~~ YOU DIED! ~~~~~~~~~~\n";
-        cout << "        0 - New Game\n";
-        cout << "        Q - Quit Game\n";
-        cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
+        _output << "\n";
+        _output << "~~~~~~~~~~ YOU DIED! ~~~~~~~~~~\n";
+        _output << "        0 - New Game\n";
+        _output << "        Q - Quit Game\n";
+        _output << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
     }
 
-    static Command decode(char key)
+    void showControls() const
     {
-        switch (tolower(static_cast<unsigned char>(key)))
+        showMessage("HOLY DIVER | WASD move | IJKL light | 0 toggle full map (dev) | R restart | Q quit | Enter confirms");
+    }
+
+    static Command decode(char key, InputContext context = InputContext::Playing)
+    {
+        int normalized = tolower(static_cast<unsigned char>(key));
+        if (normalized == 'q') return { CommandType::Quit };
+
+        if (context == InputContext::GameOver)
+            return normalized == '0' ? Command{ CommandType::StartNewGame } : Command{};
+
+        switch (normalized)
         {
-        case 'w': return {CommandType::Move, Direction::Up};
-        case 's': return {CommandType::Move, Direction::Down};
-        case 'a': return {CommandType::Move, Direction::Left};
-        case 'd': return {CommandType::Move, Direction::Right};
-        case 'i': return {CommandType::Illuminate, Direction::Up};
-        case 'k': return {CommandType::Illuminate, Direction::Down};
-        case 'j': return {CommandType::Illuminate, Direction::Left};
-        case 'l': return {CommandType::Illuminate, Direction::Right};
-        case '0': return {CommandType::ToggleMapVisibility};
-        case 'r': return {CommandType::Restart};
-        case 'q': return {CommandType::Quit};
+        case 'w': return { CommandType::Move, Direction::Up };
+        case 's': return { CommandType::Move, Direction::Down };
+        case 'a': return { CommandType::Move, Direction::Left };
+        case 'd': return { CommandType::Move, Direction::Right };
+        case 'i': return { CommandType::Illuminate, Direction::Up };
+        case 'k': return { CommandType::Illuminate, Direction::Down };
+        case 'j': return { CommandType::Illuminate, Direction::Left };
+        case 'l': return { CommandType::Illuminate, Direction::Right };
+        case '0': return { CommandType::ToggleMapVisibility };
+        case 'r': return { CommandType::Restart };
         default: return {};
         }
     }
 
-    Command readCommand() const
+    Command readCommand(InputContext context = InputContext::Playing) const
     {
-        cout << ">>> ";
+        _output << ">>> ";
         string line;
-        
-        if (!getline(cin, line))
-            return {CommandType::Quit};
-        
-        return line.empty() ? Command{} : decode(line.front());
+
+        if (!getline(_input, line))
+            return { CommandType::Quit };
+
+        return line.empty() ? Command{} : decode(line.front(), context);
+    }
+
+    bool readMapPath(string& path) const
+    {
+        _output << "Map path (0 = TextMap.txt, Q = quit): ";
+
+        if (!getline(_input, path) || path == "q" || path == "Q")
+            return false;
+
+        if (path == "0")
+            path = "TextMap.txt";
+
+        return true;
     }
 
     void showMessage(const string& message) const
     {
         if (!message.empty())
-            cout << message << '\n';
+            _output << message << '\n';
     }
+
+    void showTurnResult(const TurnResult& result) const
+    {
+        string message;
+        switch (result.outcome)
+        {
+        case ActionOutcome::MovementBlocked:     message = "Movement blocked."; break;
+        case ActionOutcome::OutsideMap:          message = "No tile in that direction."; break;
+        case ActionOutcome::InsufficientBattery: message = "Not enough battery."; break;
+        case ActionOutcome::Illuminated:         message = "Tile illuminated."; break;
+        case ActionOutcome::Ignored:
+        case ActionOutcome::Moved:
+            break;
+        }
+
+        if (result.damage > 0)
+        {
+            if (!message.empty()) message += ' ';
+            message += "Damage taken: " + to_string(result.damage);
+        }
+
+        showMessage(message);
+    }
+
+    void showDeathCause(DeathCause cause) const
+    {
+        switch (cause)
+        {
+        case DeathCause::Injuries:       showMessage("You died from injuries."); break;
+        case DeathCause::OxygenDepleted: showMessage("You ran out of oxygen."); break;
+        case DeathCause::None:           break;
+        }
+    }
+
+    void toggleMapVisibility()
+    {
+        _showWholeMap = !_showWholeMap;
+        showMessage(_showWholeMap ? "Full map visibility ON (dev)." : "Full map visibility OFF (dev).");
+    }
+
+    void resetMapVisibility() { _showWholeMap = false; }
 
     void render(const World& world, int lives) const
     {
-        cout << '\n';
+        _output << '\n';
         for (int y = 0; y < world.height(); ++y)
         {
             for (int x = 0; x < world.width(); ++x)
-                cout << world.symbolAt({x, y}) << ' ';
+                _output << symbol(world.cellAt({ x, y }, _showWholeMap)) << ' ';
 
-            cout << '\n';
+            _output << '\n';
         }
 
-        const auto& p = world.player();
-        
-        cout << "Health: " << p.health() << endl
-             << "Oxygen: " << p.oxygen() << endl
-             << "Battery: " << p.battery() << endl
-             << "Lives: " << lives << "\n\n";
+        PlayerStats stats = world.playerStats();
+
+        _output << "Health: " << stats.health << '\n'
+            << "Oxygen: " << stats.oxygen << '\n'
+            << "Battery: " << stats.battery << '\n'
+            << "Lives: " << lives << "\n\n";
     }
+
+private:
+
+    static char symbol(CellContent content)
+    {
+        switch (content)
+        {
+        case CellContent::Outside:           return '?';
+        case CellContent::Hidden:            return ' ';
+        case CellContent::Wall:              return 'x';
+        case CellContent::Water:             return 'o';
+        case CellContent::Player:            return 'P';
+        case CellContent::StationaryEnemy:   return 'm';
+        case CellContent::RandomWalkerEnemy: return 'M';
+        }
+
+        return '?';
+    }
+
+    istream& _input;
+    ostream& _output;
+    bool _showWholeMap = false;
 };
 
-// Game controls the session and replaces the whole world on restart
+/*********************************
+           Game session
+**********************************/
+
+// Responsibility: manage the session loop, level selection, lives, restarts,
+// and transitions between playing and game-over input.
+// ConsoleUI handles input/output; World handles gameplay; level-loading and
+// population functions build replacements before the current world is discarded.
 class Game
 {
 
 public:
-    
+
+    explicit Game(istream& input = cin, ostream& output = cout)
+        : _ui(input, output) {
+    }
+
     void run()
     {
         _ui.DisplayMainMenu();
-
-        _ui.showMessage("HOLY DIVER | WASD move | IJKL light | 0 toggle full map (dev) | R restart | Q quit | Enter confirms");
+        _ui.showControls();
 
         if (!chooseLevel()) return;
 
         _ui.render(*_world, _lives);
-        
+
         while (true)
         {
-            if (_lives == 0)
-            {
+            bool gameOver = _lives == 0;
+            if (gameOver)
                 _ui.DisplayDeathScreen();
-                Command command = _ui.readCommand();
 
-                if (command.type == CommandType::Quit)
-                    break;
-
-                // In the death menu, 0 starts a fresh game instead of toggling the map
-                if (command.type == CommandType::ToggleMapVisibility)
-                {
-                    if (reload())
-                    {
-                        _lives = 3;
-                        _ui.showMessage("New game started.");
-                        _ui.render(*_world, _lives);
-                    }
-                }
-                else
-                    _ui.showMessage("Press 0 for a new game or Q to quit.");
-
-                continue;
-            }
-
-            Command command = _ui.readCommand();
-
+            Command command = _ui.readCommand(gameOver ? InputContext::GameOver : InputContext::Playing);
             if (command.type == CommandType::Quit)
                 break;
 
-            if (command.type == CommandType::Restart)
-            {
-                if (reload()) { _lives = 3; _ui.showMessage("Game restarted."); }
-            }
-            
-            else if (command.type == CommandType::ToggleMapVisibility)
-            {
-                _world->toggleMapVisibility();
-                _ui.showMessage(_world->isWholeMapVisible() ? "Full map visibility ON (dev)." : "Full map visibility OFF (dev).");
-            }
-
-            else if (command.type == CommandType::Invalid)
-                continue;
-
-            else if (!_world->player().isAlive())
-                _ui.showMessage("Press R to restart or Q to quit.");
-            
+            if (gameOver)
+                handleGameOverCommand(command);
             else
-            {
-                _ui.showMessage(_world->takeTurn(command));
-                
-                if (!_world->player().isAlive())
-                {
-                    _ui.showMessage(_world->player().health() <= 0 ? "You died from injuries." : "You ran out of oxygen.");
-                    --_lives;
-                    if (_lives > 0) { if (reload()) _ui.showMessage("Life lost. Level restarted."); }
-                }
-            }
-            
-            if (_lives > 0)
-                _ui.render(*_world, _lives);
+                handleGameplayCommand(command);
         }
     }
 
 private:
 
+    static constexpr int StartingLives = 3;
+
+    static unique_ptr<World> createWorld(const string& path)
+    {
+        auto world = make_unique<World>(MapLoader::load(path));
+        LevelPopulation::addDefaults(*world);
+        return world;
+    }
+
     bool chooseLevel()
     {
-        while (true)
+        string path;
+        while (_ui.readMapPath(path))
         {
-            cout << "Map path (0 = TextMap.txt, Q = quit): ";
-            string path;
-            
-            if (!getline(cin, path) || path == "q" || path == "Q")
-                return false;
-            
-            if (path == "0")
-                path = "TextMap.txt";
-            
             try
             {
-                auto candidate = make_unique<World>(MapLoader::load(path));
+                auto candidate = createWorld(path);
                 _mapPath = path;
                 _world = move(candidate);
+                _lives = StartingLives;
+                _ui.resetMapVisibility();
                 return true;
             }
-            
+
             catch (const exception& error) { _ui.showMessage(error.what()); }
         }
+
+        return false;
     }
-    
+
     bool reload()
     {
         try
         {
-            // Do not discard the current world unless replacement succeeds
-            auto candidate = make_unique<World>(MapLoader::load(_mapPath));
+            // Keep the current world and UI state unless replacement succeeds.
+            auto candidate = createWorld(_mapPath);
             _world = move(candidate);
+            _ui.resetMapVisibility();
             return true;
         }
-        
+
         catch (const exception& error) { _ui.showMessage(error.what()); return false; }
+    }
+
+    void handleGameOverCommand(Command command)
+    {
+        if (command.type != CommandType::StartNewGame)
+        {
+            _ui.showMessage("Press 0 for a new game or Q to quit.");
+            return;
+        }
+
+        if (reload())
+        {
+            _lives = StartingLives;
+            _ui.showMessage("New game started.");
+            _ui.render(*_world, _lives);
+        }
+    }
+
+    void handleGameplayCommand(Command command)
+    {
+        switch (command.type)
+        {
+        case CommandType::Restart:
+            if (reload())
+            {
+                _lives = StartingLives;
+                _ui.showMessage("Game restarted.");
+            }
+            break;
+
+        case CommandType::ToggleMapVisibility:
+            _ui.toggleMapVisibility();
+            break;
+
+        case CommandType::Move:
+        case CommandType::Illuminate:
+            if (!_world->isPlayerAlive())
+            {
+                _ui.showMessage("Press R to restart or Q to quit.");
+                break;
+            }
+
+            processTurn(command);
+            break;
+
+        default:
+            return;
+        }
+
+        if (_lives > 0)
+            _ui.render(*_world, _lives);
+    }
+
+    void processTurn(Command command)
+    {
+        TurnResult result = _world->takeTurn(command);
+        _ui.showTurnResult(result);
+
+        if (result.deathCause != DeathCause::None)
+            handlePlayerDeath(result.deathCause);
+    }
+
+    void handlePlayerDeath(DeathCause cause)
+    {
+        _ui.showDeathCause(cause);
+        --_lives;
+
+        if (_lives > 0 && reload())
+            _ui.showMessage("Life lost. Level restarted.");
     }
 
     ConsoleUI _ui;
     unique_ptr<World> _world;
     string _mapPath;
-    int _lives = 3;
+    int _lives = StartingLives;
 };
 
-//Codex tests defined through compiler
+// Define HOLYDIVER_TEST when including this file in a separate test program.
 #ifndef HOLYDIVER_TEST
 int main() { Game game; game.run(); }
 #endif
