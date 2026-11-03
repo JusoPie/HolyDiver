@@ -83,14 +83,14 @@ struct EnemySpawn
 
 struct LevelData 
 {
-    // Terrain never contains player or enemy characters.
+    // Terrain never contains player or enemy characters. Enemies, items, and walls(other than borders) are generated trough code
     vector<string> terrain;
     Position playerSpawn;
     vector<EnemySpawn> enemies;
 };
 
 
-// Player stores resources. Only World can change its position.
+// Player stores resources. Only World can change its position
 class Player
 {
 
@@ -130,7 +130,7 @@ public:
         return true;
     }
 
-    // These functions for when items are added.
+    // These functions for when items are added
     void replenishOxygen(int amount)
     {
         _oxygen += clamp(amount, 0, Maximum - _oxygen);
@@ -156,7 +156,7 @@ private:
 };
 
 
-// Enemies suggest moves; World checks whether those moves are allowed.
+// Enemies suggest moves; World checks whether those moves are allowed
 class Enemy 
 {
 
@@ -183,7 +183,7 @@ public:
         if (!_active || _movement == EnemyMovement::Stationary)
             return _position;
 
-        // Four directions plus a chance to stay still.
+        // Four directions plus a chance to stay still
         int choice = uniform_int_distribution<int>(0, 4)(random);
         if (choice == 4) return _position;
         return adjacent(_position, static_cast<Direction>(choice));
@@ -198,7 +198,7 @@ private:
     bool _active = false;
 };
 
-// The loader only reads files. It never writes to the map.
+// The loader only reads files. It never writes to the map
 class MapLoader 
 {
 
@@ -276,7 +276,7 @@ public:
 };
 
 
-// World owns the terrain, visibility, player, and enemies.
+// World owns the terrain, visibility, player, and enemies
 class World 
 {
 
@@ -285,7 +285,7 @@ public:
     explicit World(LevelData level, unsigned seed = random_device{}())
         : _terrain(move(level.terrain)), _player(level.playerSpawn), _random(seed)
     {
-        // Validate even when LevelData was created without MapLoader.
+        // Validate even when LevelData was created without MapLoader
         if (_terrain.empty() || _terrain.front().empty())
             throw runtime_error("Empty world.");
         
@@ -307,9 +307,9 @@ public:
             _enemies.emplace_back(spawn.position, spawn.movement);
         }
         
-        // Existing maps need no editing: supply a missing enemy type automatically.
-        addMissingEnemy(EnemyMovement::Stationary, 'm');
-        addMissingEnemy(EnemyMovement::RandomWalker, 'M');
+        // Add enemies to blank map and reveals player
+        addEnemy(EnemyMovement::Stationary, 'm');
+        addEnemy(EnemyMovement::RandomWalker, 'M');
         reveal(_player.position());
     }
     
@@ -327,7 +327,7 @@ public:
     
     bool isWalkable(Position p) const { return isInside(p) && _terrain[p.y][p.x] == 'o'; }
     
-    // Development view leaves exploration and enemy activation unchanged.
+    // Development view leaves exploration and enemy activation unchanged
     void toggleMapVisibility() { _showWholeMap = !_showWholeMap; }
 
     bool isWholeMapVisible() const { return _showWholeMap; }
@@ -346,11 +346,11 @@ public:
         if (!_player.isAlive() || (command.type != CommandType::Move && command.type != CommandType::Illuminate))
             return "";
         
-        // Every gameplay attempt uses oxygen, even when blocked.
+        // Every gameplay attempt uses oxygen
         _player.consumeOxygen(2);
         
         if (!_player.isAlive())
-            return "You ran out of oxygen.";
+            return ""; // Game reports the cause of death.
         
         Position target = adjacent(_player.position(), command.direction);
         
@@ -358,16 +358,29 @@ public:
         
         if (command.type == CommandType::Move)
         {
-            if (isWalkable(target)) { _player._position = target; reveal(target); }
-            else message = "Movement blocked.";
-        } else {
-            if (!isInside(target)) message = "No tile in that direction.";
+            if (isWalkable(target))
+            {
+                _player._position = target; reveal(target);
+            }
+            else
+                message = "Movement blocked.";
+        } 
+        
+        else
+        {
+            if (!isInside(target))
+                message = "No tile in that direction.";
+
             else if (!_player.tryConsumeBattery(5))
                 message = "Not enough battery.";
-            else { reveal(target); message = "Tile illuminated."; }
+
+            else
+            {
+                reveal(target); message = "Tile illuminated.";
+            }
         }
 
-        // A collision before and after enemy movement must not cause two hits.
+        // A collision before and after enemy movement must not cause two hits
         vector<bool> hit(_enemies.size(), false);
         int damage = collide(hit);
         
@@ -376,13 +389,16 @@ public:
             for (auto& enemy : _enemies) 
             {
                 Position next = enemy.chooseMove(_random);
-                if (isWalkable(next) && !occupied(next)) enemy._position = next;
+
+                if (isWalkable(next) && !occupied(next))
+                    enemy._position = next;
             }
 
             damage += collide(hit);
         }
 
-        if (damage) message += " Damage taken: " + to_string(damage);
+        if (damage)
+            message += " Damage taken: " + to_string(damage);
         
         return message;
     }
@@ -391,24 +407,31 @@ private:
     
     bool occupied(Position p) const
     {
-        for (const auto& enemy : _enemies) if (enemy.position() == p) return true;
+        for (const auto& enemy : _enemies)
+            if (enemy.position() == p)
+                return true;
+
         return false;
     }
 
-    void addMissingEnemy(EnemyMovement movement, char symbol)
+    void addEnemy(EnemyMovement movement, char symbol)
     {
-        for (const auto& enemy : _enemies) if (enemy.symbol() == symbol) return;
+        for (const auto& enemy : _enemies)
+            if (enemy.symbol() == symbol)
+                return;
         
         vector<Position> free;
         
         for (int y = 0; y < height(); ++y) for (int x = 0; x < width(); ++x)
         {
             Position p{x, y};
-            if (isWalkable(p) && !(p == _player.position()) && !occupied(p)) free.push_back(p);
+            if (isWalkable(p) && !(p == _player.position()) && !occupied(p))
+                free.push_back(p);
         }
 
-        // Tiny maps may have no room for another enemy.
-        if (free.empty()) return;
+        // Tiny maps may have no room for another enemy
+        if (free.empty())
+            return;
         auto index = uniform_int_distribution<size_t>(0, free.size() - 1)(_random);
         _enemies.emplace_back(free[index], movement);
     }
@@ -416,7 +439,10 @@ private:
     void reveal(Position p)
     {
         _revealed[p.y][p.x] = true;
-        for (auto& enemy : _enemies) if (enemy.position() == p) enemy.activate();
+
+        for (auto& enemy : _enemies)
+            if (enemy.position() == p)
+                enemy.activate();
     }
 
     int collide(vector<bool>& hit)
@@ -436,7 +462,7 @@ private:
         return damage;
     }
 
-    // Containers free their own memory when the world is replaced or destroyed.
+    // Containers free their own memory when the world is replaced or destroyed
     vector<string> _terrain;
     vector<vector<bool>> _revealed;
     bool _showWholeMap = false;
@@ -445,7 +471,7 @@ private:
     mt19937 _random;
 };
 
-// ConsoleUI reads commands and displays data; it does not change the world.
+// ConsoleUI reads commands and displays data; it does not change the world
 class ConsoleUI
 {
 
@@ -475,6 +501,24 @@ public:
         cout << "\n";
         cout << "~~~~~~~~~~ HOLY DIVER ~~~~~~~~~~\n";
         cout << "        0 - Start Game\n";
+        cout << "        Q - Quit Game\n";
+        cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
+    }
+
+    void DisplayDeathScreen() const
+    {
+        cout << R"ASCII(
+   )\.-.      /`-.    )\   )\   )\.---.          .-./(       .-.   )\.---.     /`-.  
+ ,' ,-,_)   ,' _  \  (  ',/ /  (   ,-._(       ,'     )  ,'  /  ) (   ,-._(  ,' _  \ 
+(  .   __  (  '-' (   )    (    \  '-,        (  .-, (  (  ) | (   \  '-,   (  '-' ( 
+ ) '._\ _)  )   _  ) (  \(\ \    ) ,-`         ) '._\ )  ) './ /    ) ,-`    ) ,_ .' 
+(  ,   (   (  ,' ) \  `.) /  )  (  ``-.       (  ,   (  (  ,  (    (  ``-.  (  ' ) \ 
+ )/'._.'    )/    )/      '.(    )..-.(        )/ ._.'   )/..'      )..-.(   )/   )/ 
+                                                                                     )ASCII";
+
+        cout << "\n";
+        cout << "~~~~~~~~~~ YOU DIED! ~~~~~~~~~~\n";
+        cout << "        0 - New Game\n";
         cout << "        Q - Quit Game\n";
         cout << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
     }
@@ -511,7 +555,8 @@ public:
 
     void showMessage(const string& message) const
     {
-        if (!message.empty()) cout << message << '\n';
+        if (!message.empty())
+            cout << message << '\n';
     }
 
     void render(const World& world, int lives) const
@@ -519,7 +564,9 @@ public:
         cout << '\n';
         for (int y = 0; y < world.height(); ++y)
         {
-            for (int x = 0; x < world.width(); ++x) cout << world.symbolAt({x, y}) << ' ';
+            for (int x = 0; x < world.width(); ++x)
+                cout << world.symbolAt({x, y}) << ' ';
+
             cout << '\n';
         }
 
@@ -532,7 +579,7 @@ public:
     }
 };
 
-// Game controls the session and replaces the whole world on restart.
+// Game controls the session and replaces the whole world on restart
 class Game
 {
 
@@ -550,6 +597,30 @@ public:
         
         while (true)
         {
+            if (_lives == 0)
+            {
+                _ui.DisplayDeathScreen();
+                Command command = _ui.readCommand();
+
+                if (command.type == CommandType::Quit)
+                    break;
+
+                // In the death menu, 0 starts a fresh game instead of toggling the map
+                if (command.type == CommandType::ToggleMapVisibility)
+                {
+                    if (reload())
+                    {
+                        _lives = 3;
+                        _ui.showMessage("New game started.");
+                        _ui.render(*_world, _lives);
+                    }
+                }
+                else
+                    _ui.showMessage("Press 0 for a new game or Q to quit.");
+
+                continue;
+            }
+
             Command command = _ui.readCommand();
 
             if (command.type == CommandType::Quit)
@@ -581,11 +652,11 @@ public:
                     _ui.showMessage(_world->player().health() <= 0 ? "You died from injuries." : "You ran out of oxygen.");
                     --_lives;
                     if (_lives > 0) { if (reload()) _ui.showMessage("Life lost. Level restarted."); }
-                    else _ui.showMessage("GAME OVER. R restarts; Q quits.");
                 }
             }
             
-            _ui.render(*_world, _lives);
+            if (_lives > 0)
+                _ui.render(*_world, _lives);
         }
     }
 
@@ -620,7 +691,7 @@ private:
     {
         try
         {
-            // Do not discard the current world unless replacement succeeds.
+            // Do not discard the current world unless replacement succeeds
             auto candidate = make_unique<World>(MapLoader::load(_mapPath));
             _world = move(candidate);
             return true;
@@ -635,8 +706,7 @@ private:
     int _lives = 3;
 };
 
-// Tests can include these classes without creating a second main function.
-//Codex tests defined through compiler?
+//Codex tests defined through compiler
 #ifndef HOLYDIVER_TEST
 int main() { Game game; game.run(); }
 #endif
