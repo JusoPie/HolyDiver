@@ -4,17 +4,20 @@
 *
 */
 
-#include <algorithm>
-#include <cctype>
-#include <fstream>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <random>
-#include <stdexcept>
-#include <string>
-#include <utility>
-#include <vector>
+/*Tested only on windows and should be c++17 friendly. No found platform specific stuff.
+TextMap.txt MUST BE IN THE SAME FOLDER THAN THIS FILE */
+
+#include <algorithm> //clamp()
+#include <cctype>    //tolower()
+#include <fstream>   //map loading
+#include <iostream>  //cin, cout, isteam, ostream
+#include <limits>    //numeric_limits<int>::max() used for map dimentions
+#include <memory>    //unique_ptr<World> for automatic memory cleanup
+#include <random>    //random
+#include <stdexcept> //reports invalid data
+#include <string>    //map rows, file paths, commands, and displayed messages
+#include <utility>   //move()
+#include <vector>    //rows, enemies, revealed cells, available spawn positions, and collision flags
 
 using namespace std;
 
@@ -22,7 +25,7 @@ using namespace std;
              Helpers
 **********************************/
 
-// Value type representing a location on the grid.
+// value representing a location on the map
 struct Position
 {
     int x = 0; int y = 0;
@@ -65,13 +68,15 @@ enum class CommandType
     Invalid
 };
 
-// Value type describing an action independently of keyboard input.
+// value describing an action independently of keyboard input
 struct Command
 {
     CommandType type = CommandType::Invalid;
     Direction direction = Direction::Up;
 };
 
+// used to choose input based on gameplay state
+// see Game -> void Run()
 enum class InputContext
 {
     Playing,
@@ -84,14 +89,13 @@ enum class EnemyMovement
     RandomWalker
 };
 
-// Level-construction data, not a live enemy.
 struct EnemySpawn
 {
     Position position;
     EnemyMovement movement = EnemyMovement::Stationary;
 };
 
-// Parsed level data. Terrain contains only water and walls.
+// Parsed level data. Terrain contains only water and walls
 struct LevelData
 {
     vector<string> terrain;
@@ -116,7 +120,7 @@ enum class ActionOutcome
     Illuminated
 };
 
-// Gameplay result containing facts for Game and ConsoleUI to interpret.
+// Gameplay result containing facts for Game and ConsoleUI
 struct TurnResult
 {
     ActionOutcome outcome = ActionOutcome::Ignored;
@@ -124,7 +128,6 @@ struct TurnResult
     DeathCause deathCause = DeathCause::None;
 };
 
-// Read-only snapshot for displaying resources without exposing a live Player.
 struct PlayerStats
 {
     int health = 0;
@@ -138,7 +141,7 @@ enum class TerrainTile
     Water
 };
 
-// Semantic cell contents. ConsoleUI chooses the actual display characters.
+// What each cell can contain
 enum class CellContent
 {
     Outside,
@@ -154,9 +157,15 @@ enum class CellContent
           Game objects
 **********************************/
 
-// Responsibility: own the player's position and resources, keep resource
-// values within their limits, and determine whether the player is alive.
+// PLAYER
+
+// Responsibility:
+// - own the player's position and resources
+// - keep resource values within their limits
+// - determine whether the player is alive.
+
 // World owns the live Player and validates destinations before calling moveTo.
+
 class Player
 {
 
@@ -210,7 +219,7 @@ public:
         return true;
     }
 
-    // Resource restoration is ready for future item interactions.
+    // Resource restoration is redy for adding items to the game
     void replenishOxygen(int amount)
     {
         _oxygen += clamp(amount, 0, Maximum - _oxygen);
@@ -232,9 +241,12 @@ private:
     int _health = Maximum, _oxygen = Maximum, _battery = Maximum;
 };
 
-// Responsibility: own an enemy's position, activation state, damage value,
-// and movement behavior. World validates and applies proposed movement.
-// Display characters and spawning policy do not belong to Enemy.
+// ENEMY
+
+// Responsibility:
+// - own an enemy's position, activation state, damage value, and movement behavior
+// - world validates and applies proposed movement
+
 class Enemy
 {
 
@@ -269,7 +281,9 @@ public:
 
         // Four directions plus a chance to stay still.
         int choice = uniform_int_distribution<int>(0, 4)(random);
-        if (choice == 4) return _position;
+        if (choice == 4)
+            return _position;
+
         return adjacent(_position, static_cast<Direction>(choice));
     }
 
@@ -280,8 +294,13 @@ private:
     bool _active = false;
 };
 
-// Responsibility: own and validate the static grid, and answer terrain and
-// boundary queries. It knows nothing about actors, visibility, or console output.
+// TERRAIN
+
+// Responsibility:
+// - own and validate the static grid map
+// - answer terrain and boundary queries
+// - it knows nothing about actors, visibility, or console output
+
 class Terrain
 {
 
@@ -332,9 +351,11 @@ private:
           Level loading
 **********************************/
 
-// Responsibility: translate the map-file format into level data.
-// Namespace functions are sufficient because the loader has no instance state.
-// Terrain validates the grid; World validates relationships between spawns.
+//LevelData
+
+// Responsibility:
+// - translate the map-file format into level data
+
 namespace MapLoader
 {
     LevelData read(istream& input)
@@ -407,10 +428,12 @@ namespace MapLoader
            World rules
 **********************************/
 
-// Responsibility: own the live actors and exploration state, validate actor
-// placement, and coordinate movement, illumination, and collision rules.
-// It returns gameplay facts and exposes snapshots, never mutable actor references.
-// Terrain owns grid details; ConsoleUI owns presentation; Game owns session lives.
+// Responsibility: 
+// - own the live actors and exploration state
+// - validate actor placement
+// - coordinate movement, illumination, and collision rules
+// - it returns gameplay facts
+
 class World
 {
 
@@ -457,8 +480,6 @@ public:
         return _terrain.tileAt(p) == TerrainTile::Water ? CellContent::Water : CellContent::Wall;
     }
 
-    // Explicit setup operation. The caller decides which enemy types are required.
-    // Identity is based on behavior, never on a character used for rendering.
     void addEnemyIfMissing(EnemyMovement movement)
     {
         if (movement != EnemyMovement::Stationary && movement != EnemyMovement::RandomWalker)
@@ -477,7 +498,7 @@ public:
                 free.push_back(p);
         }
 
-        // Tiny maps may have no room for another enemy.
+        // tiny maps may have no room for another enemy
         if (free.empty())
             return;
 
@@ -495,7 +516,7 @@ public:
         if (!_player.isAlive() || (command.type != CommandType::Move && command.type != CommandType::Illuminate))
             return result;
 
-        // Every gameplay attempt uses oxygen, including blocked attempts.
+        // every gameplay attempt uses oxygen also blocked attempts.
         _player.consumeOxygen(OxygenPerTurn);
 
         if (!_player.isAlive())
@@ -507,7 +528,7 @@ public:
         Position target = adjacent(_player.position(), command.direction);
         result.outcome = command.type == CommandType::Move ? movePlayer(target) : illuminate(target);
 
-        // Each enemy can hit at most once during this turn.
+        // each enemy can hit at most once during this turn.
         vector<bool> hit(_enemies.size(), false);
         result.damage = collide(hit);
 
@@ -602,8 +623,11 @@ private:
     mt19937 _random;
 };
 
-// Responsibility: define the default population policy explicitly, separately
-// from World construction. Existing enemies of either type are retained.
+//LEVEL POPULATION
+
+// Responsibility:
+// - define the default enemies explicitly
+
 namespace LevelPopulation
 {
     void addDefaults(World& world)
@@ -617,10 +641,13 @@ namespace LevelPopulation
            Console UI
 **********************************/
 
-// Responsibility: read console input, decode commands for the current menu,
-// and format all world results and cell contents for display.
-// The development-map toggle affects presentation only, never exploration.
-// Stream references allow the same UI to work with cin/cout or test streams.
+// Responsibility: 
+// - read console input
+// - define commands for the current menu
+// - format all world results and cell contents for display
+// - the map visibility toggle affects visuals only, never exploration.
+// - cool af ASCII art
+
 class ConsoleUI
 {
 
@@ -822,10 +849,13 @@ private:
            Game session
 **********************************/
 
-// Responsibility: manage the session loop, level selection, lives, restarts,
-// and transitions between playing and game-over input.
+// Responsibility
+// - manage the session loop, level selection, lives, restarts
+// - handle transitions between playing and game-over input
+
 // ConsoleUI handles input/output; World handles gameplay; level-loading and
-// population functions build replacements before the current world is discarded.
+// population functions build replacements before the current world is discarded
+
 class Game
 {
 
@@ -897,7 +927,7 @@ private:
     {
         try
         {
-            // Keep the current world and UI state unless replacement succeeds.
+            // keep the current world and UI state unless replacement succeeds
             auto candidate = createWorld(_mapPath);
             _world = move(candidate);
             _ui.resetMapVisibility();
@@ -982,7 +1012,7 @@ private:
     int _lives = StartingLives;
 };
 
-// Define HOLYDIVER_TEST when including this file in a separate test program.
+// define HOLYDIVER_TEST when including this file in a separate test program
 #ifndef HOLYDIVER_TEST
 int main() { Game game; game.run(); }
 #endif
