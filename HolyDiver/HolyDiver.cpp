@@ -95,12 +95,26 @@ struct EnemySpawn
     EnemyMovement movement = EnemyMovement::Stationary;
 };
 
+enum class ItemType
+{
+    HealthPotion,
+    OxygenTank,
+    BatteryRecharge
+};
+
+struct ItemSpawn
+{
+    Position position;
+    ItemType type;
+};
+
 // Parsed level data. Terrain contains only water and walls
 struct LevelData
 {
     vector<string> terrain;
     Position playerSpawn;
     vector<EnemySpawn> enemies;
+    vector<ItemSpawn> items;
 };
 
 enum class DeathCause
@@ -150,7 +164,10 @@ enum class CellContent
     Water,
     Player,
     StationaryEnemy,
-    RandomWalkerEnemy
+    RandomWalkerEnemy,
+    HealthPotion,
+    OxygenTank,
+    BatteryRecharge
 };
 
 /*********************************
@@ -219,7 +236,7 @@ public:
         return true;
     }
 
-    // Resource restoration is redy for adding items to the game
+    // Resource restoration is capped at Maximum.
     void replenishOxygen(int amount)
     {
         _oxygen += clamp(amount, 0, Maximum - _oxygen);
@@ -239,6 +256,47 @@ private:
 
     Position _position;
     int _health = Maximum, _oxygen = Maximum, _battery = Maximum;
+};
+
+// BASE ITEM
+
+// Items own their position. World owns their lifetime and supplies the live player.
+class Item
+{
+public:
+    explicit Item(Position position) : _position(position) {}
+    virtual ~Item() = default;
+
+    Position position() const { return _position; }
+    virtual ItemType type() const = 0;
+    virtual void applyTo(Player& player) const = 0;
+
+private:
+    Position _position;
+};
+
+class HealthPotion : public Item
+{
+public:
+    using Item::Item;
+    ItemType type() const override { return ItemType::HealthPotion; }
+    void applyTo(Player& player) const override { player.restoreHealth(30); }
+};
+
+class OxygenTank : public Item
+{
+public:
+    using Item::Item;
+    ItemType type() const override { return ItemType::OxygenTank; }
+    void applyTo(Player& player) const override { player.replenishOxygen(30); }
+};
+
+class BatteryRecharge : public Item
+{
+public:
+    using Item::Item;
+    ItemType type() const override { return ItemType::BatteryRecharge; }
+    void applyTo(Player& player) const override { player.rechargeBattery(10); }
 };
 
 // ENEMY
@@ -311,7 +369,7 @@ public:
         if (_rows.empty() || _rows.front().empty())
             throw runtime_error("Empty terrain.");
 
-        const auto maximum = static_cast<size_t>(numeric_limits<int>::max());
+        constexpr auto maximum = static_cast<size_t>(numeric_limits<int>::max()); //tried const.. had a warning. Changed to constexpr.. no warning.
         if (_rows.size() > maximum || _rows.front().size() > maximum)
             throw runtime_error("Map is too large.");
 
@@ -372,7 +430,7 @@ namespace MapLoader
             if (row.empty())
                 throw runtime_error("Map has an empty row.");
 
-            const auto maximum = static_cast<size_t>(numeric_limits<int>::max());
+            constexpr auto maximum = static_cast<size_t>(numeric_limits<int>::max()); //tried const.. had a warning. Changed to constexpr.. no warning.
             if (row.size() > maximum || level.terrain.size() >= maximum)
                 throw runtime_error("Map is too large.");
 
@@ -392,6 +450,15 @@ namespace MapLoader
                         throw runtime_error("Map needs exactly one P.");
 
                     level.playerSpawn = p; foundPlayer = true; row[x] = 'o'; break;
+
+                case 'H':
+                    level.items.push_back({ p, ItemType::HealthPotion }); row[x] = 'o'; break;
+
+                case 'O':
+                    level.items.push_back({ p, ItemType::OxygenTank }); row[x] = 'o'; break;
+
+                case '+':
+                    level.items.push_back({ p, ItemType::BatteryRecharge }); row[x] = 'o'; break;
 
                 case 'm':
                     level.enemies.push_back({ p, EnemyMovement::Stationary }); row[x] = 'o'; break;
@@ -455,6 +522,15 @@ public:
             _enemies.emplace_back(spawn.position, spawn.movement);
         }
 
+        for (const auto& spawn : level.items)
+        {
+            if (!_terrain.isWalkable(spawn.position) || spawn.position == _player.position()
+                || occupied(spawn.position) || itemAt(spawn.position))
+                throw runtime_error("Invalid item spawn.");
+
+            addItem(spawn.position, spawn.type);
+        }
+
         reveal(_player.position());
     }
 
@@ -477,6 +553,16 @@ public:
                 return enemy.movement() == EnemyMovement::Stationary
                 ? CellContent::StationaryEnemy : CellContent::RandomWalkerEnemy;
 
+        if (const Item* item = itemAt(p))
+        {
+            switch (item->type())
+            {
+            case ItemType::HealthPotion:    return CellContent::HealthPotion;
+            case ItemType::OxygenTank:      return CellContent::OxygenTank;
+            case ItemType::BatteryRecharge: return CellContent::BatteryRecharge;
+            }
+        }
+
         return _terrain.tileAt(p) == TerrainTile::Water ? CellContent::Water : CellContent::Wall;
     }
 
@@ -494,7 +580,7 @@ public:
         for (int y = 0; y < height(); ++y) for (int x = 0; x < width(); ++x)
         {
             Position p{ x, y };
-            if (_terrain.isWalkable(p) && !(p == _player.position()) && !occupied(p))
+            if (_terrain.isWalkable(p) && !(p == _player.position()) && !occupied(p) && !itemAt(p))
                 free.push_back(p);
         }
 
@@ -508,6 +594,41 @@ public:
 
         if (_revealed[spawn.y][spawn.x])
             _enemies.back().activate();
+    }
+
+    void addItemIfMissing(ItemType type)
+    {
+        for (const auto& item : _items)
+            if (item->type() == type)
+                return;
+
+        // Flood-fill water so default pickups can always be reached from spawn.
+        vector<vector<bool>> visited(height(), vector<bool>(width(), false));
+        vector<Position> reachable{ _player.position() };
+        visited[_player.position().y][_player.position().x] = true;
+        vector<Position> free;
+        for (size_t i = 0; i < reachable.size(); ++i)
+        {
+            Position p = reachable[i];
+            if (!(p == _player.position()) && !occupied(p) && !itemAt(p))
+                free.push_back(p);
+
+            for (Direction direction : { Direction::Up, Direction::Down, Direction::Left, Direction::Right })
+            {
+                Position next = adjacent(p, direction);
+                if (_terrain.isWalkable(next) && !visited[next.y][next.x])
+                {
+                    visited[next.y][next.x] = true;
+                    reachable.push_back(next);
+                }
+            }
+        }
+
+        if (free.empty())
+            throw runtime_error("Not enough reachable water for the starting items.");
+
+        auto index = uniform_int_distribution<size_t>(0, free.size() - 1)(_random);
+        addItem(free[index], type);
     }
 
     TurnResult takeTurn(Command command)
@@ -554,6 +675,7 @@ private:
 
         _player.moveTo(target);
         reveal(target);
+        collectItems();
         return ActionOutcome::Moved;
     }
 
@@ -577,6 +699,40 @@ private:
 
             if (_terrain.isWalkable(next) && !occupied(next))
                 enemy.moveTo(next);
+        }
+    }
+
+    void addItem(Position position, ItemType type)
+    {
+        switch (type)
+        {
+        case ItemType::HealthPotion:    _items.push_back(make_unique<HealthPotion>(position)); break;
+        case ItemType::OxygenTank:      _items.push_back(make_unique<OxygenTank>(position)); break;
+        case ItemType::BatteryRecharge: _items.push_back(make_unique<BatteryRecharge>(position)); break;
+        default: throw runtime_error("Invalid item type.");
+        }
+    }
+
+    const Item* itemAt(Position p) const
+    {
+        for (const auto& item : _items)
+            if (item->position() == p)
+                return item.get();
+
+        return nullptr;
+    }
+
+    void collectItems()
+    {
+        for (auto item = _items.begin(); item != _items.end();)
+        {
+            if ((*item)->position() == _player.position())
+            {
+                (*item)->applyTo(_player);
+                item = _items.erase(item);
+            }
+            else
+                ++item;
         }
     }
 
@@ -620,13 +776,14 @@ private:
     vector<vector<bool>> _revealed;
     Player _player;
     vector<Enemy> _enemies;
+    vector<unique_ptr<Item>> _items;
     mt19937 _random;
 };
 
 //LEVEL POPULATION
 
 // Responsibility:
-// - define the default enemies explicitly
+// - define the default enemies and pickups explicitly
 
 namespace LevelPopulation
 {
@@ -634,6 +791,9 @@ namespace LevelPopulation
     {
         world.addEnemyIfMissing(EnemyMovement::Stationary);
         world.addEnemyIfMissing(EnemyMovement::RandomWalker);
+        world.addItemIfMissing(ItemType::HealthPotion);
+        world.addItemIfMissing(ItemType::OxygenTank);
+        world.addItemIfMissing(ItemType::BatteryRecharge);
     }
 }
 
@@ -705,6 +865,7 @@ public:
 
     void showControls() const
     {
+        showMessage("Pickups: H = health +30 | O = oxygen +30 | + = battery +10 (maximum 100)");
         showMessage("HOLY DIVER | WASD move | IJKL light | 0 toggle full map (dev) | R restart | Q quit | Enter confirms");
     }
 
@@ -835,6 +996,9 @@ private:
         case CellContent::Player:            return 'P';
         case CellContent::StationaryEnemy:   return 'm';
         case CellContent::RandomWalkerEnemy: return 'M';
+        case CellContent::HealthPotion:      return 'H';
+        case CellContent::OxygenTank:        return 'O';
+        case CellContent::BatteryRecharge:   return '+';
         }
 
         return '?';
