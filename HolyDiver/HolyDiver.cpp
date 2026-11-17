@@ -99,7 +99,8 @@ enum class ItemType
 {
     HealthPotion,
     OxygenTank,
-    BatteryRecharge
+    BatteryRecharge,
+    TreasureChest
 };
 
 struct ItemSpawn
@@ -147,6 +148,7 @@ struct PlayerStats
     int health = 0;
     int oxygen = 0;
     int battery = 0;
+    int treasure = 0;
 };
 
 enum class TerrainTile
@@ -188,7 +190,7 @@ class Player
 
 public:
 
-    static constexpr int Maximum = 100;
+    static constexpr int Maximum = 100; 
 
     explicit Player(Position spawn) : _position(spawn) {}
 
@@ -197,8 +199,9 @@ public:
     int health() const { return _health; }
     int oxygen() const { return _oxygen; }
     int battery() const { return _battery; }
+    int treasure() const { return _treasure; }
 
-    PlayerStats stats() const { return { _health, _oxygen, _battery }; }
+    PlayerStats stats() const { return { _health, _oxygen, _battery, _treasure }; }
 
     bool isAlive() const
     {
@@ -236,7 +239,12 @@ public:
         return true;
     }
 
-    // Resource restoration is capped at Maximum.
+    void addTreasure(int amount) 
+    {
+        _treasure += clamp(amount, 0, )
+    }
+
+    // Resource restoration is capped at Maximum
     void replenishOxygen(int amount)
     {
         _oxygen += clamp(amount, 0, Maximum - _oxygen);
@@ -255,7 +263,7 @@ public:
 private:
 
     Position _position;
-    int _health = Maximum, _oxygen = Maximum, _battery = Maximum;
+    int _health = Maximum, _oxygen = Maximum, _battery = Maximum, _treasure = 3; //TODO: Add a treasure count for wincon??
 };
 
 // BASE ITEM
@@ -297,6 +305,14 @@ public:
     using Item::Item;
     ItemType type() const override { return ItemType::BatteryRecharge; }
     void applyTo(Player& player) const override { player.rechargeBattery(10); }
+};
+
+class TreasureChest : public Item
+{
+public:
+    using Item::Item;
+    ItemType type() const override { return ItemType::TreasureChest; }
+    void applyTo(Player& player) const override { player.addTreasure(1); }
 };
 
 // ENEMY
