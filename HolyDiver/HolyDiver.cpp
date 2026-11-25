@@ -1,14 +1,20 @@
 /*
 *
 * Holy diver - an epic adventure at object-oriented world way beneath the surface!
+* 
+* Collect three treasures(T) to advance to next level. Avoid monsters (m) and (M)
+* Maps are designed manually, but missing treasures are placed in random reachable cells.
+* Items ( H, +, O ) are used on pickup.
 *
 */
 
 /*Tested only on windows and should be c++17 friendly. No found platform specific stuff.
-TextMap.txt MUST BE IN THE SAME FOLDER THAN THIS FILE */
+Start with Level0.txt in the working directory. Add Level1.txt, Level2.txt, etc. alongside it. */
 
 #include <algorithm> //clamp()
 #include <cctype>    //tolower()
+#include <charconv>  //numbered level filenames
+#include <filesystem> //next level path
 #include <fstream>   //map loading
 #include <iostream>  //cin, cout, isteam, ostream
 #include <limits>    //numeric_limits<int>::max() used for map dimentions
@@ -16,6 +22,7 @@ TextMap.txt MUST BE IN THE SAME FOLDER THAN THIS FILE */
 #include <random>    //random
 #include <stdexcept> //reports invalid data
 #include <string>    //map rows, file paths, commands, and displayed messages
+#include <string_view> //special map icons
 #include <utility>   //move()
 #include <vector>    //rows, enemies, revealed cells, available spawn positions, and collision flags
 
@@ -62,7 +69,8 @@ enum class CommandType
     Move,
     Illuminate,
     ToggleMapVisibility,
-    StartNewGame,
+    MainMenu,
+    NextLevel,
     Restart,
     Quit,
     Invalid
@@ -80,7 +88,7 @@ struct Command
 enum class InputContext
 {
     Playing,
-    GameOver
+    EndMenu
 };
 
 enum class EnemyMovement
@@ -169,7 +177,8 @@ enum class CellContent
     RandomWalkerEnemy,
     HealthPotion,
     OxygenTank,
-    BatteryRecharge
+    BatteryRecharge,
+    TreasureChest
 };
 
 /*********************************
@@ -239,9 +248,9 @@ public:
         return true;
     }
 
-    void addTreasure(int amount) 
+    void collectTreasure()
     {
-        _treasure += clamp(amount, 0, )
+        ++_treasure;
     }
 
     // Resource restoration is capped at Maximum
@@ -263,7 +272,8 @@ public:
 private:
 
     Position _position;
-    int _health = Maximum, _oxygen = Maximum, _battery = Maximum, _treasure = 3; //TODO: Add a treasure count for wincon??
+    int _health = Maximum, _oxygen = Maximum, _battery = Maximum;
+    int _treasure = 0;
 };
 
 // BASE ITEM
@@ -312,7 +322,7 @@ class TreasureChest : public Item
 public:
     using Item::Item;
     ItemType type() const override { return ItemType::TreasureChest; }
-    void applyTo(Player& player) const override { player.addTreasure(1); }
+    void applyTo(Player& player) const override { player.collectTreasure(); }
 };
 
 // ENEMY
@@ -476,6 +486,9 @@ namespace MapLoader
                 case '+':
                     level.items.push_back({ p, ItemType::BatteryRecharge }); row[x] = 'o'; break;
 
+                case 'T':
+                    level.items.push_back({ p, ItemType::TreasureChest }); row[x] = 'o'; break;
+
                 case 'm':
                     level.enemies.push_back({ p, EnemyMovement::Stationary }); row[x] = 'o'; break;
 
@@ -502,7 +515,7 @@ namespace MapLoader
     LevelData load(const string& path)
     {
         ifstream file(path);
-        if (!file) throw runtime_error("Could not open map: " + path);
+        if (!file) throw runtime_error("Could not open map.");
         return read(file);
     }
 }
@@ -521,6 +534,8 @@ class World
 {
 
 public:
+
+    static constexpr int TreasuresToPass = 3;
 
     explicit World(LevelData level, unsigned seed = random_device{}())
         : _terrain(move(level.terrain)), _player(level.playerSpawn), _random(seed)
@@ -557,6 +572,7 @@ public:
     PlayerStats playerStats() const { return _player.stats(); }
 
     bool isPlayerAlive() const { return _player.isAlive(); }
+    bool isLevelPassed() const { return _player.treasure() >= TreasuresToPass; }
 
     CellContent cellAt(Position p, bool showWholeMap = false) const
     {
@@ -576,6 +592,7 @@ public:
             case ItemType::HealthPotion:    return CellContent::HealthPotion;
             case ItemType::OxygenTank:      return CellContent::OxygenTank;
             case ItemType::BatteryRecharge: return CellContent::BatteryRecharge;
+            case ItemType::TreasureChest:   return CellContent::TreasureChest;
             }
         }
 
@@ -600,7 +617,7 @@ public:
                 free.push_back(p);
         }
 
-        // tiny maps may have no room for another enemy
+        
         if (free.empty())
             return;
 
@@ -612,21 +629,31 @@ public:
             _enemies.back().activate();
     }
 
-    void addItemIfMissing(ItemType type)
+    void addDefaultItems(ItemType type, size_t count = 1)
     {
-        for (const auto& item : _items)
-            if (item->type() == type)
-                return;
+        if (type != ItemType::TreasureChest)
+        {
+            for (const auto& item : _items)
+                if (item->type() == type)
+                    return;
+        }
 
-        // Flood-fill water so default pickups can always be reached from spawn.
+        // Flood-fill water so default pickups can always be reached from spawn
         vector<vector<bool>> visited(height(), vector<bool>(width(), false));
         vector<Position> reachable{ _player.position() };
         visited[_player.position().y][_player.position().x] = true;
         vector<Position> free;
+        size_t reachableTreasures = 0;
+
         for (size_t i = 0; i < reachable.size(); ++i)
         {
             Position p = reachable[i];
-            if (!(p == _player.position()) && !occupied(p) && !itemAt(p))
+            const Item* item = itemAt(p);
+
+            if (item && item->type() == ItemType::TreasureChest)
+                ++reachableTreasures;
+            
+            if (!(p == _player.position()) && !occupied(p) && !item)
                 free.push_back(p);
 
             for (Direction direction : { Direction::Up, Direction::Down, Direction::Left, Direction::Right })
@@ -640,17 +667,31 @@ public:
             }
         }
 
-        if (free.empty())
-            throw runtime_error("Not enough reachable water for the starting items.");
+        if (type == ItemType::TreasureChest)
+        {
+            if (reachableTreasures >= count)
+                return;
+            count -= reachableTreasures;
+            if (free.size() < count)
+                throw runtime_error("Not enough reachable water to place the treasures.");
+        }
 
-        auto index = uniform_int_distribution<size_t>(0, free.size() - 1)(_random);
-        addItem(free[index], type);
+        count = min(count, free.size());
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            auto index = uniform_int_distribution<size_t>(0, free.size() - 1)(_random);
+            addItem(free[index], type);
+            free[index] = free.back();
+            free.pop_back();
+        }
     }
 
     TurnResult takeTurn(Command command)
     {
         TurnResult result;
-        if (!_player.isAlive() || (command.type != CommandType::Move && command.type != CommandType::Illuminate))
+        if (!_player.isAlive() || isLevelPassed()
+            || (command.type != CommandType::Move && command.type != CommandType::Illuminate))
             return result;
 
         // every gameplay attempt uses oxygen also blocked attempts.
@@ -664,6 +705,9 @@ public:
 
         Position target = adjacent(_player.position(), command.direction);
         result.outcome = command.type == CommandType::Move ? movePlayer(target) : illuminate(target);
+
+        if (isLevelPassed())
+            return result;
 
         // each enemy can hit at most once during this turn.
         vector<bool> hit(_enemies.size(), false);
@@ -687,7 +731,11 @@ private:
     ActionOutcome movePlayer(Position target)
     {
         if (!_terrain.isWalkable(target))
+        {
+            if (_terrain.isInside(target))
+                reveal(target);
             return ActionOutcome::MovementBlocked;
+        }
 
         _player.moveTo(target);
         reveal(target);
@@ -725,6 +773,7 @@ private:
         case ItemType::HealthPotion:    _items.push_back(make_unique<HealthPotion>(position)); break;
         case ItemType::OxygenTank:      _items.push_back(make_unique<OxygenTank>(position)); break;
         case ItemType::BatteryRecharge: _items.push_back(make_unique<BatteryRecharge>(position)); break;
+        case ItemType::TreasureChest:   _items.push_back(make_unique<TreasureChest>(position)); break;
         default: throw runtime_error("Invalid item type.");
         }
     }
@@ -805,11 +854,12 @@ namespace LevelPopulation
 {
     void addDefaults(World& world)
     {
+        world.addDefaultItems(ItemType::TreasureChest, World::TreasuresToPass);
         world.addEnemyIfMissing(EnemyMovement::Stationary);
         world.addEnemyIfMissing(EnemyMovement::RandomWalker);
-        world.addItemIfMissing(ItemType::HealthPotion);
-        world.addItemIfMissing(ItemType::OxygenTank);
-        world.addItemIfMissing(ItemType::BatteryRecharge);
+        world.addDefaultItems(ItemType::HealthPotion);
+        world.addDefaultItems(ItemType::OxygenTank);
+        world.addDefaultItems(ItemType::BatteryRecharge);
     }
 }
 
@@ -874,13 +924,20 @@ public:
 
         _output << "\n";
         _output << "~~~~~~~~~~ YOU DIED! ~~~~~~~~~~\n";
-        _output << "        0 - New Game\n";
+        _output << "        0 - Main Menu\n";
         _output << "        Q - Quit Game\n";
         _output << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
     }
 
+    void DisplayLevelPassed() const
+    {
+        showMessage("Level passed");
+        showMessage("0 - Main Menu | N - Next Level | Q - Quit Game");
+    }
+
     void showControls() const
     {
+        showMessage("Collect " + to_string(World::TreasuresToPass) + " treasures (T) to pass the level.");
         showMessage("Pickups: H = health +30 | O = oxygen +30 | + = battery +10 (maximum 100)");
         showMessage("HOLY DIVER | WASD move | IJKL light | 0 toggle full map (dev) | R restart | Q quit | Enter confirms");
     }
@@ -890,8 +947,12 @@ public:
         int normalized = tolower(static_cast<unsigned char>(key));
         if (normalized == 'q') return { CommandType::Quit };
 
-        if (context == InputContext::GameOver)
-            return normalized == '0' ? Command{ CommandType::StartNewGame } : Command{};
+        if (context == InputContext::EndMenu)
+        {
+            if (normalized == '0') return { CommandType::MainMenu };
+            if (normalized == 'n') return { CommandType::NextLevel };
+            return {};
+        }
 
         switch (normalized)
         {
@@ -922,13 +983,13 @@ public:
 
     bool readMapPath(string& path) const
     {
-        _output << "Map path (0 = TextMap.txt, Q = quit): ";
+        _output << "Map path (0 = Level0.txt, Q = quit): ";
 
         if (!getline(_input, path) || path == "q" || path == "Q")
             return false;
 
         if (path == "0")
-            path = "TextMap.txt";
+            path = "Level0.txt";
 
         return true;
     }
@@ -985,17 +1046,36 @@ public:
         _output << '\n';
         for (int y = 0; y < world.height(); ++y)
         {
+            bool previousWasSpecial = false;
             for (int x = 0; x < world.width(); ++x)
-                _output << symbol(world.cellAt({ x, y }, _showWholeMap)) << ' ';
+            {
+                const char icon = symbol(world.cellAt({ x, y }, _showWholeMap));
+                const bool special = string_view("H+mMTO").find(icon) != string_view::npos;
+
+                if (special)
+                    _output << '(' << icon << ')';
+                
+                else
+                {
+                    if (x > 0 && !previousWasSpecial)
+                        _output << ' ';
+                    
+                    _output << icon;
+                }
+
+                previousWasSpecial = special;
+            }
 
             _output << '\n';
         }
 
         PlayerStats stats = world.playerStats();
 
-        _output << "Health: " << stats.health << '\n'
+        _output 
+            << "Health: " << stats.health << '\n'
             << "Oxygen: " << stats.oxygen << '\n'
             << "Battery: " << stats.battery << '\n'
+            << "Treasures: " << stats.treasure << '/' << World::TreasuresToPass << '\n'
             << "Lives: " << lives << "\n\n";
     }
 
@@ -1015,6 +1095,7 @@ private:
         case CellContent::HealthPotion:      return 'H';
         case CellContent::OxygenTank:        return 'O';
         case CellContent::BatteryRecharge:   return '+';
+        case CellContent::TreasureChest:     return 'T';
         }
 
         return '?';
@@ -1031,7 +1112,7 @@ private:
 
 // Responsibility
 // - manage the session loop, level selection, lives, restarts
-// - handle transitions between playing and game-over input
+// - handle transitions between playing and end-of-level input
 
 // ConsoleUI handles input/output; World handles gameplay; level-loading and
 // population functions build replacements before the current world is discarded
@@ -1047,26 +1128,35 @@ public:
 
     void run()
     {
-        _ui.DisplayMainMenu();
-        _ui.showControls();
-
         if (!chooseLevel()) return;
-
-        _ui.render(*_world, _lives);
 
         while (true)
         {
-            bool gameOver = _lives == 0;
+            const bool gameOver = _lives == 0;
+            const bool levelPassed = _world->isLevelPassed();
+
             if (gameOver)
                 _ui.DisplayDeathScreen();
+            
+            else if (levelPassed)
+                _ui.DisplayLevelPassed();
 
-            Command command = _ui.readCommand(gameOver ? InputContext::GameOver : InputContext::Playing);
+            const bool levelEnded = gameOver || levelPassed;
+
+            Command command = _ui.readCommand(levelEnded ? InputContext::EndMenu : InputContext::Playing);
+            
             if (command.type == CommandType::Quit)
-                break;
+                return;
 
-            if (gameOver)
-                handleGameOverCommand(command);
-            else
+            if (command.type == CommandType::MainMenu)
+            {
+                if (!chooseLevel()) return;
+            }
+            
+            else if (levelPassed && command.type == CommandType::NextLevel)
+                advanceLevel();
+            
+            else if (!levelEnded)
                 handleGameplayCommand(command);
         }
     }
@@ -1075,60 +1165,80 @@ private:
 
     static constexpr int StartingLives = 3;
 
-    static unique_ptr<World> createWorld(const string& path)
-    {
-        auto world = make_unique<World>(MapLoader::load(path));
-        LevelPopulation::addDefaults(*world);
-        return world;
-    }
-
-    bool chooseLevel()
-    {
-        string path;
-        while (_ui.readMapPath(path))
-        {
-            try
-            {
-                auto candidate = createWorld(path);
-                _mapPath = path;
-                _world = move(candidate);
-                _lives = StartingLives;
-                _ui.resetMapVisibility();
-                return true;
-            }
-
-            catch (const exception& error) { _ui.showMessage(error.what()); }
-        }
-
-        return false;
-    }
-
-    bool reload()
+    bool loadLevel(string path)
     {
         try
         {
-            // keep the current world and UI state unless replacement succeeds
-            auto candidate = createWorld(_mapPath);
+            auto candidate = make_unique<World>(MapLoader::load(path));
+            LevelPopulation::addDefaults(*candidate);
+            _mapPath = move(path);
             _world = move(candidate);
             _ui.resetMapVisibility();
             return true;
         }
 
-        catch (const exception& error) { _ui.showMessage(error.what()); return false; }
+        catch (const exception& error)
+        {
+            _ui.showMessage(path + ": " + error.what());
+            return false;
+        }
     }
 
-    void handleGameOverCommand(Command command)
+    bool chooseLevel()
     {
-        if (command.type != CommandType::StartNewGame)
+        _ui.DisplayMainMenu();
+        _ui.showControls();
+
+        string path;
+        while (_ui.readMapPath(path))
         {
-            _ui.showMessage("Press 0 for a new game or Q to quit.");
+            if (loadLevel(path))
+            {
+                _lives = StartingLives;
+                _ui.render(*_world, _lives);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void advanceLevel()
+    {
+        const filesystem::path currentPath(_mapPath);
+        const string filename = currentPath.stem().string();
+        constexpr string_view prefix = "Level";
+        constexpr string_view extension = ".txt";
+
+        if (filename.compare(0, prefix.size(), prefix) != 0 || currentPath.extension() != extension)
+        {
+            _ui.showMessage("Next Level requires a numbered file such as Level0.txt.");
             return;
         }
 
-        if (reload())
+        unsigned int number = 0;
+        const char* end = filename.data() + filename.size();
+        const auto parsed = from_chars(filename.data() + prefix.size(), end, number);
+
+        if (parsed.ec != errc{} || parsed.ptr != end || number == numeric_limits<unsigned int>::max())
         {
-            _lives = StartingLives;
-            _ui.showMessage("New game started.");
+            _ui.showMessage("No next level number for " + currentPath.filename().string() + ".");
+            return;
+        }
+
+        const string nextFilename = "Level" + to_string(number + 1) + string(extension);
+        const auto nextPath = currentPath.parent_path() / nextFilename;
+        error_code error;
+
+        if (!filesystem::exists(nextPath, error) && !error)
+        {
+            _ui.showMessage("No next level file found (" + nextPath.string() + ").");
+            return;
+        }
+
+        if (loadLevel(nextPath.string()))
+        {
+            _ui.showMessage("Started " + nextFilename);
             _ui.render(*_world, _lives);
         }
     }
@@ -1138,7 +1248,7 @@ private:
         switch (command.type)
         {
         case CommandType::Restart:
-            if (reload())
+            if (loadLevel(_mapPath))
             {
                 _lives = StartingLives;
                 _ui.showMessage("Game restarted.");
@@ -1150,6 +1260,7 @@ private:
             break;
 
         case CommandType::Move:
+
         case CommandType::Illuminate:
             if (!_world->isPlayerAlive())
             {
@@ -1182,7 +1293,7 @@ private:
         _ui.showDeathCause(cause);
         --_lives;
 
-        if (_lives > 0 && reload())
+        if (_lives > 0 && loadLevel(_mapPath))
             _ui.showMessage("Life lost. Level restarted.");
     }
 
