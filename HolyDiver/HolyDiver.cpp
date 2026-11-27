@@ -3,13 +3,18 @@
 * Holy diver - an epic adventure at object-oriented world way beneath the surface!
 * 
 * Collect three treasures(T) to advance to next level. Avoid monsters (m) and (M)
-* Maps are designed manually, but missing treasures are placed in random reachable cells.
+* Maps are designed manually, but missing treasures and items are placed in random reachable cells.
 * Items ( H, +, O ) are used on pickup.
+* 
+* The game starts with Level0.txt in the working directory. Add Level1.txt, Level2.txt, etc. alongside it.
+* The game ends after completing the last custom level in the working directory.
+* You can add your own custom levels.
 *
 */
 
-/*Tested only on windows and should be c++17 friendly. No found platform specific stuff.
-Start with Level0.txt in the working directory. Add Level1.txt, Level2.txt, etc. alongside it. */
+// TODO: bug on item picup(player dies before picking up oxygen tank), Item highlights 
+
+/*Tested only on windows and should be c++17 friendly. No found platform specific stuff.*/
 
 #include <algorithm> //clamp()
 #include <cctype>    //tolower()
@@ -88,6 +93,7 @@ struct Command
 enum class InputContext
 {
     Playing,
+    LevelPassed,
     EndMenu
 };
 
@@ -929,12 +935,32 @@ public:
         _output << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
     }
 
+    void DisplayGameCompleted() const
+    {
+        _output << R"ASCII(
+O))      O))                           O)) O)                                                         O))
+ O))    O))                          O))    O))                           O)                          O))
+  O)) O))      O))    O))  O))        O))      O))  O))O) O)))O))     O))   O))     O))   O))         O))
+    O))      O))  O)) O))  O))          O))    O))  O)) O))    O))   O)) O)) O))   O))  O)   O))  O)) O))
+    O))     O))    O))O))  O))             O)) O))  O)) O))     O)) O))  O))  O)) O))  O))))) O))O)   O))
+    O))      O))  O)) O))  O))       O))    O))O))  O)) O))      O)O))   O))   O)O))   O)        O)   O))
+    O))        O))      O))O))         O)) O)    O))O))O)))       O))    O))    O))      O))))    O)) O))
+                                                                                                         
+                                                                                     )ASCII";
+       
+        _output << "\n";
+        _output << "~~~~~~~~ GAME COMPLETED ~~~~~~~~\n";
+        _output << "        0 - Main Menu\n";
+        _output << "        Q - Quit Game\n";
+        _output << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n";
+    }
+
     void DisplayLevelPassed() const
     {
         showMessage("Level passed");
         showMessage("0 - Main Menu | N - Next Level | Q - Quit Game");
     }
-
+    
     void showControls() const
     {
         showMessage("Collect " + to_string(World::TreasuresToPass) + " treasures (T) to pass the level.");
@@ -947,10 +973,11 @@ public:
         int normalized = tolower(static_cast<unsigned char>(key));
         if (normalized == 'q') return { CommandType::Quit };
 
-        if (context == InputContext::EndMenu)
+        if (context != InputContext::Playing)
         {
             if (normalized == '0') return { CommandType::MainMenu };
-            if (normalized == 'n') return { CommandType::NextLevel };
+            if (context == InputContext::LevelPassed && normalized == 'n')
+                return { CommandType::NextLevel };
             return {};
         }
 
@@ -1046,7 +1073,7 @@ public:
         _output << '\n';
         for (int y = 0; y < world.height(); ++y)
         {
-            bool previousWasSpecial = false;
+            //bool previousWasSpecial = false;
             for (int x = 0; x < world.width(); ++x)
             {
                 const char icon = symbol(world.cellAt({ x, y }, _showWholeMap));
@@ -1054,16 +1081,8 @@ public:
 
                 if (special)
                     _output << '(' << icon << ')';
-                
                 else
-                {
-                    if (x > 0 && !previousWasSpecial)
-                        _output << ' ';
-                    
-                    _output << icon;
-                }
-
-                previousWasSpecial = special;
+                    _output << ' ' << icon << ' ';
             }
 
             _output << '\n';
@@ -1123,8 +1142,7 @@ class Game
 public:
 
     explicit Game(istream& input = cin, ostream& output = cout)
-        : _ui(input, output) {
-    }
+        : _ui(input, output) {}
 
     void run()
     {
@@ -1132,19 +1150,31 @@ public:
 
         while (true)
         {
-            const bool gameOver = _lives == 0;
-            const bool levelPassed = _world->isLevelPassed();
+            InputContext context = InputContext::Playing;
+            filesystem::path nextPath;
 
-            if (gameOver)
+            if (_lives == 0)
+            {
                 _ui.DisplayDeathScreen();
-            
-            else if (levelPassed)
-                _ui.DisplayLevelPassed();
+                context = InputContext::EndMenu;
+            }
+            else if (_world->isLevelPassed())
+            {
+                nextPath = nextLevelPath();
+                if (nextPath.empty())
+                {
+                    _ui.DisplayGameCompleted();
+                    context = InputContext::EndMenu;
+                }
+                else
+                {
+                    _ui.DisplayLevelPassed();
+                    context = InputContext::LevelPassed;
+                }
+            }
 
-            const bool levelEnded = gameOver || levelPassed;
+            const Command command = _ui.readCommand(context);
 
-            Command command = _ui.readCommand(levelEnded ? InputContext::EndMenu : InputContext::Playing);
-            
             if (command.type == CommandType::Quit)
                 return;
 
@@ -1152,11 +1182,10 @@ public:
             {
                 if (!chooseLevel()) return;
             }
-            
-            else if (levelPassed && command.type == CommandType::NextLevel)
-                advanceLevel();
-            
-            else if (!levelEnded)
+            else if (command.type == CommandType::NextLevel)
+                advanceLevel(nextPath);
+
+            else if (context == InputContext::Playing)
                 handleGameplayCommand(command);
         }
     }
@@ -1203,7 +1232,7 @@ private:
         return false;
     }
 
-    void advanceLevel()
+    filesystem::path nextLevelPath() const
     {
         const filesystem::path currentPath(_mapPath);
         const string filename = currentPath.stem().string();
@@ -1211,34 +1240,30 @@ private:
         constexpr string_view extension = ".txt";
 
         if (filename.compare(0, prefix.size(), prefix) != 0 || currentPath.extension() != extension)
-        {
-            _ui.showMessage("Next Level requires a numbered file such as Level0.txt.");
-            return;
-        }
+            return {};
 
         unsigned int number = 0;
         const char* end = filename.data() + filename.size();
         const auto parsed = from_chars(filename.data() + prefix.size(), end, number);
 
         if (parsed.ec != errc{} || parsed.ptr != end || number == numeric_limits<unsigned int>::max())
-        {
-            _ui.showMessage("No next level number for " + currentPath.filename().string() + ".");
-            return;
-        }
+            return {};
 
         const string nextFilename = "Level" + to_string(number + 1) + string(extension);
         const auto nextPath = currentPath.parent_path() / nextFilename;
         error_code error;
 
         if (!filesystem::exists(nextPath, error) && !error)
-        {
-            _ui.showMessage("No next level file found (" + nextPath.string() + ").");
-            return;
-        }
+            return {};
 
+        return nextPath;
+    }
+
+    void advanceLevel(const filesystem::path& nextPath)
+    {
         if (loadLevel(nextPath.string()))
         {
-            _ui.showMessage("Started " + nextFilename);
+            _ui.showMessage("Started " + nextPath.filename().string());
             _ui.render(*_world, _lives);
         }
     }
